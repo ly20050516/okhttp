@@ -15,16 +15,15 @@
  */
 package okhttp3.internal;
 
-import java.net.MalformedURLException;
+import java.io.IOException;
 import java.net.Socket;
-import java.net.UnknownHostException;
+import javax.annotation.Nullable;
 import javax.net.ssl.SSLSocket;
 import okhttp3.Address;
 import okhttp3.Call;
 import okhttp3.ConnectionPool;
 import okhttp3.ConnectionSpec;
 import okhttp3.Headers;
-import okhttp3.HttpUrl;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.Response;
@@ -33,6 +32,9 @@ import okhttp3.internal.cache.InternalCache;
 import okhttp3.internal.connection.RealConnection;
 import okhttp3.internal.connection.RouteDatabase;
 import okhttp3.internal.connection.StreamAllocation;
+import okhttp3.internal.duplex.HeadersListener;
+import okhttp3.internal.duplex.HttpSink;
+import okhttp3.internal.http2.Http2Codec;
 
 /**
  * Escalate internal APIs in {@code okhttp3} so they can be used from OkHttp's implementation
@@ -72,10 +74,23 @@ public abstract class Internal {
   public abstract void apply(ConnectionSpec tlsConfiguration, SSLSocket sslSocket,
       boolean isFallback);
 
-  public abstract HttpUrl getHttpUrlChecked(String url)
-      throws MalformedURLException, UnknownHostException;
+  public abstract boolean isInvalidHttpUrlHost(IllegalArgumentException e);
 
   public abstract StreamAllocation streamAllocation(Call call);
 
+  public abstract @Nullable IOException timeoutExit(Call call, @Nullable IOException e);
+
   public abstract Call newWebSocketCall(OkHttpClient client, Request request);
+
+  public abstract void duplex(Request.Builder requestBuilder, String method);
+
+  public abstract void setHttp2Codec(Response.Builder builder, Http2Codec http2Codec);
+
+  public abstract void httpSink(Response.Builder responseBuilder, HttpSink httpSink);
+
+  public abstract HttpSink httpSink(Response response);
+
+  public abstract boolean isDuplex(Request request);
+
+  public abstract void headersListener(Response response, HeadersListener headersListener);
 }

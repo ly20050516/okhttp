@@ -85,7 +85,7 @@ public final class ConnectionPoolTest {
     synchronized (pool) {
       StreamAllocation streamAllocation = new StreamAllocation(pool, addressA, null,
           EventListener.NONE, null);
-      streamAllocation.acquire(c1);
+      streamAllocation.acquire(c1, true);
     }
 
     // Running at time 50, the pool returns that nothing can be evicted until time 150.
@@ -179,7 +179,7 @@ public final class ConnectionPoolTest {
     synchronized (pool) {
       StreamAllocation leak = new StreamAllocation(pool, connection.route().address(), null,
           EventListener.NONE, null);
-      leak.acquire(connection);
+      leak.acquire(connection, true);
     }
   }
 
@@ -193,7 +193,7 @@ public final class ConnectionPoolTest {
 
   private Address newAddress(String name) {
     return new Address(name, 1, Dns.SYSTEM, SocketFactory.getDefault(), null, null, null,
-        new RecordingOkAuthenticator("password"), null, Collections.<Protocol>emptyList(),
+        new RecordingOkAuthenticator("password", null), null, Collections.<Protocol>emptyList(),
         Collections.<ConnectionSpec>emptyList(),
         ProxySelector.getDefault());
   }

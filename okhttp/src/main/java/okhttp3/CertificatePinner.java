@@ -182,7 +182,7 @@ public final class CertificatePinner {
           if (sha1 == null) sha1 = sha1(x509Certificate);
           if (pin.hash.equals(sha1)) return; // Success!
         } else {
-          throw new AssertionError();
+          throw new AssertionError("unsupported hashAlgorithm: " + pin.hashAlgorithm);
         }
       }
     }
@@ -226,7 +226,8 @@ public final class CertificatePinner {
   }
 
   /** Returns a certificate pinner that uses {@code certificateChainCleaner}. */
-  CertificatePinner withCertificateChainCleaner(CertificateChainCleaner certificateChainCleaner) {
+  CertificatePinner withCertificateChainCleaner(
+      @Nullable CertificateChainCleaner certificateChainCleaner) {
     return equal(this.certificateChainCleaner, certificateChainCleaner)
         ? this
         : new CertificatePinner(pins, certificateChainCleaner);
@@ -267,8 +268,8 @@ public final class CertificatePinner {
     Pin(String pattern, String pin) {
       this.pattern = pattern;
       this.canonicalHostname = pattern.startsWith(WILDCARD)
-          ? HttpUrl.parse("http://" + pattern.substring(WILDCARD.length())).host()
-          : HttpUrl.parse("http://" + pattern).host();
+          ? HttpUrl.get("http://" + pattern.substring(WILDCARD.length())).host()
+          : HttpUrl.get("http://" + pattern).host();
       if (pin.startsWith("sha1/")) {
         this.hashAlgorithm = "sha1/";
         this.hash = ByteString.decodeBase64(pin.substring("sha1/".length()));

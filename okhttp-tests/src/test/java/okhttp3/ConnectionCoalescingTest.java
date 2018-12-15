@@ -17,16 +17,19 @@ package okhttp3;
 
 import java.io.IOException;
 import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.Proxy;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import javax.net.ssl.HostnameVerifier;
 import javax.net.ssl.SSLSession;
-import okhttp3.internal.tls.HeldCertificate;
-import okhttp3.internal.tls.SslClient;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
+import okhttp3.tls.HeldCertificate;
+import okhttp3.tls.HandshakeCertificates;
 import org.junit.Before;
 import org.junit.Ignore;
 import org.junit.Rule;
@@ -48,18 +51,18 @@ public final class ConnectionCoalescingTest {
 
   @Before public void setUp() throws Exception {
     rootCa = new HeldCertificate.Builder()
-        .serialNumber("1")
-        .ca(3)
+        .serialNumber(1L)
+        .certificateAuthority(0)
         .commonName("root")
         .build();
     certificate = new HeldCertificate.Builder()
-        .issuedBy(rootCa)
-        .serialNumber("2")
+        .signedBy(rootCa)
+        .serialNumber(2L)
         .commonName(server.getHostName())
-        .subjectAlternativeName(server.getHostName())
-        .subjectAlternativeName("san.com")
-        .subjectAlternativeName("*.wildcard.com")
-        .subjectAlternativeName("differentdns.com")
+        .addSubjectAlternativeName(server.getHostName())
+        .addSubjectAlternativeName("san.com")
+        .addSubjectAlternativeName("*.wildcard.com")
+        .addSubjectAlternativeName("differentdns.com")
         .build();
 
     serverIps = Dns.SYSTEM.lookup(server.getHostName());
@@ -70,18 +73,19 @@ public final class ConnectionCoalescingTest {
     dns.set("www.wildcard.com", serverIps);
     dns.set("differentdns.com", Collections.<InetAddress>emptyList());
 
-    SslClient sslClient = new SslClient.Builder()
-        .addTrustedCertificate(rootCa.certificate)
+    HandshakeCertificates handshakeCertificates = new HandshakeCertificates.Builder()
+        .addTrustedCertificate(rootCa.certificate())
         .build();
 
     client = new OkHttpClient.Builder().dns(dns)
-        .sslSocketFactory(sslClient.socketFactory, sslClient.trustManager)
+        .sslSocketFactory(
+            handshakeCertificates.sslSocketFactory(), handshakeCertificates.trustManager())
         .build();
 
-    SslClient serverSslClient = new SslClient.Builder()
-        .certificateChain(certificate, rootCa)
+    HandshakeCertificates serverHandshakeCertificates = new HandshakeCertificates.Builder()
+        .heldCertificate(certificate)
         .build();
-    server.useHttps(serverSslClient.socketFactory, false);
+    server.useHttps(serverHandshakeCertificates.sslSocketFactory(), false);
 
     url = server.url("/robots.txt");
   }
@@ -177,7 +181,7 @@ public final class ConnectionCoalescingTest {
   /** Can still coalesce when pinning is used if pins match. */
   @Test public void coalescesWhenCertificatePinsMatch() throws Exception {
     CertificatePinner pinner = new CertificatePinner.Builder()
-        .add("san.com", "sha1/" + CertificatePinner.sha1(certificate.certificate).base64())
+        .add("san.com", "sha1/" + CertificatePinner.sha1(certificate.certificate()).base64())
         .build();
     client = client.newBuilder().certificatePinner(pinner).build();
 
@@ -245,6 +249,17 @@ public final class ConnectionCoalescingTest {
     server.enqueue(new MockResponse().setResponseCode(200));
     server.enqueue(new MockResponse().setResponseCode(200));
 
+    final AtomicInteger connectCount = new AtomicInteger();
+    EventListener listener = new EventListener() {
+      @Override public void connectStart(Call call, InetSocketAddress inetSocketAddress,
+          Proxy proxy) {
+        connectCount.getAndIncrement();
+      }
+    };
+    client = client.newBuilder()
+        .eventListener(listener)
+        .build();
+
     assert200Http2Response(execute(url), server.getHostName());
 
     HttpUrl sanUrl = url.newBuilder().host("san.com").build();
@@ -254,6 +269,7 @@ public final class ConnectionCoalescingTest {
     assert200Http2Response(execute(sanUrl), "san.com");
 
     assertEquals(1, client.connectionPool().connectionCount());
+    assertEquals(1, connectCount.get());
   }
 
   /** Check that wildcard SANs are supported. */
@@ -304,7 +320,7 @@ public final class ConnectionCoalescingTest {
   }
 
   private Response execute(String url) throws IOException {
-    return execute(HttpUrl.parse(url));
+    return execute(HttpUrl.get(url));
   }
 
   private Response execute(HttpUrl url) throws IOException {

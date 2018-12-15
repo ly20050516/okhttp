@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014 Square, Inc.
+ * Copyright (C) 2018 Square, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,21 +13,33 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package okhttp3.internal;
+package okhttp3.dnsoverhttps;
 
 import java.net.InetAddress;
 import java.net.UnknownHostException;
-import java.util.Collections;
 import java.util.List;
 import okhttp3.Dns;
 
 /**
- * A network that resolves only one IP address per host. Use this when testing route selection
- * fallbacks to prevent the host machine's various IP addresses from interfering.
+ * Internal Bootstrap DNS implementation for handling initial connection to DNS over HTTPS server.
+ *
+ * Returns hardcoded results for the known host.
  */
-public class SingleInetAddressDns implements Dns {
+final class BootstrapDns implements Dns {
+  private final String dnsHostname;
+  private final List<InetAddress> dnsServers;
+
+  BootstrapDns(String dnsHostname, List<InetAddress> dnsServers) {
+    this.dnsHostname = dnsHostname;
+    this.dnsServers = dnsServers;
+  }
+
   @Override public List<InetAddress> lookup(String hostname) throws UnknownHostException {
-    List<InetAddress> addresses = Dns.SYSTEM.lookup(hostname);
-    return Collections.singletonList(addresses.get(0));
+    if (!this.dnsHostname.equals(hostname)) {
+      throw new UnknownHostException(
+          "BootstrapDns called for " + hostname + " instead of " + dnsHostname);
+    }
+
+    return dnsServers;
   }
 }

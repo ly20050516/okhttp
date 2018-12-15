@@ -16,21 +16,24 @@
 package okhttp3.internal;
 
 import java.io.IOException;
-import java.net.Proxy;
 import java.util.ArrayList;
 import java.util.List;
+import javax.annotation.Nullable;
 import okhttp3.Authenticator;
+import okhttp3.Challenge;
 import okhttp3.Request;
 import okhttp3.Response;
 import okhttp3.Route;
 
 public final class RecordingOkAuthenticator implements Authenticator {
   public final List<Response> responses = new ArrayList<>();
-  public final List<Proxy> proxies = new ArrayList<>();
-  public final String credential;
+  public final List<Route> routes = new ArrayList<>();
+  public @Nullable String credential;
+  public @Nullable String scheme;
 
-  public RecordingOkAuthenticator(String credential) {
+  public RecordingOkAuthenticator(@Nullable String credential, @Nullable String scheme) {
     this.credential = credential;
+    this.scheme = scheme;
   }
 
   public Response onlyResponse() {
@@ -38,17 +41,33 @@ public final class RecordingOkAuthenticator implements Authenticator {
     return responses.get(0);
   }
 
-  public Proxy onlyProxy() {
-    if (proxies.size() != 1) throw new IllegalStateException();
-    return proxies.get(0);
+  public Route onlyRoute() {
+    if (routes.size() != 1) throw new IllegalStateException();
+    return routes.get(0);
   }
 
   @Override public Request authenticate(Route route, Response response) throws IOException {
+    if (route == null) throw new NullPointerException("route == null");
+    if (response == null) throw new NullPointerException("response == null");
+
     responses.add(response);
-    proxies.add(route.proxy());
+    routes.add(route);
+
+    if (!schemeMatches(response) || credential == null) return null;
+
     String header = response.code() == 407 ? "Proxy-Authorization" : "Authorization";
     return response.request().newBuilder()
         .addHeader(header, credential)
         .build();
+  }
+
+  private boolean schemeMatches(Response response) {
+    if (scheme == null) return true;
+
+    for (Challenge challenge : response.challenges()) {
+      if (challenge.scheme().equalsIgnoreCase(scheme)) return true;
+    }
+
+    return false;
   }
 }

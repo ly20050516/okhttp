@@ -17,13 +17,22 @@ package okhttp3.internal.http;
 
 import java.io.IOException;
 import java.net.ProtocolException;
+import java.util.ArrayList;
+import java.util.List;
+import okhttp3.Headers;
 import okhttp3.Interceptor;
 import okhttp3.Request;
 import okhttp3.Response;
+import okhttp3.internal.Internal;
 import okhttp3.internal.Util;
 import okhttp3.internal.connection.RealConnection;
 import okhttp3.internal.connection.StreamAllocation;
+import okhttp3.internal.duplex.HttpSink;
+import okhttp3.internal.http2.Header;
+import okhttp3.internal.http2.Http2Codec;
+import okio.Buffer;
 import okio.BufferedSink;
+import okio.ForwardingSink;
 import okio.Okio;
 import okio.Sink;
 
@@ -36,53 +45,122 @@ public final class CallServerInterceptor implements Interceptor {
   }
 
   @Override public Response intercept(Chain chain) throws IOException {
-    RealInterceptorChain realChain = (RealInterceptorChain) chain;
-    HttpCodec httpCodec = realChain.httpStream();
+    final RealInterceptorChain realChain = (RealInterceptorChain) chain;
+    final HttpCodec httpCodec = realChain.httpStream();
     StreamAllocation streamAllocation = realChain.streamAllocation();
     RealConnection connection = (RealConnection) realChain.connection();
     Request request = realChain.request();
 
     long sentRequestMillis = System.currentTimeMillis();
-    httpCodec.writeRequestHeaders(request);
 
+    realChain.eventListener().requestHeadersStart(realChain.call());
+    httpCodec.writeRequestHeaders(request);
+    realChain.eventListener().requestHeadersEnd(realChain.call(), request);
+
+    HttpSink httpSink = null;
     Response.Builder responseBuilder = null;
-    if (HttpMethod.permitsRequestBody(request.method()) && request.body() != null) {
+    if (HttpMethod.permitsRequestBody(request.method())
+        && (request.body() != null || Internal.instance.isDuplex(request))) {
       // If there's a "Expect: 100-continue" header on the request, wait for a "HTTP/1.1 100
-      // Continue" response before transmitting the request body. If we don't get that, return what
-      // we did get (such as a 4xx response) without ever transmitting the request body.
+      // Continue" response before transmitting the request body. If we don't get that, return
+      // what we did get (such as a 4xx response) without ever transmitting the request body.
       if ("100-continue".equalsIgnoreCase(request.header("Expect"))) {
         httpCodec.flushRequest();
+        realChain.eventListener().responseHeadersStart(realChain.call());
         responseBuilder = httpCodec.readResponseHeaders(true);
       }
 
       if (responseBuilder == null) {
-        // Write the request body if the "Expect: 100-continue" expectation was met.
-        Sink requestBodyOut = httpCodec.createRequestBody(request, request.body().contentLength());
-        BufferedSink bufferedRequestBody = Okio.buffer(requestBodyOut);
-        request.body().writeTo(bufferedRequestBody);
-        bufferedRequestBody.close();
+        if (Internal.instance.isDuplex(request)) {
+          // Prepare a duplex body so that the application can send a request body later.
+          final CountingSink requestBodyOut =
+              new CountingSink(httpCodec.createRequestBody(request, -1L));
+          final BufferedSink bufferedRequestBody = Okio.buffer(requestBodyOut);
+          httpSink = new HttpSink() {
+            @Override public BufferedSink sink() {
+              return bufferedRequestBody;
+            }
+
+            @Override public void headers(Headers headers) throws IOException {
+              List<Header> headerBlock = new ArrayList<>(headers.size() / 2);
+              for (int i = 0, size = headers.size(); i < size; i++) {
+                headerBlock.add(new Header(headers.name(i), headers.value(i)));
+              }
+              ((Http2Codec) httpCodec).writeRequestHeaders(headerBlock);
+            }
+
+            @Override public void close() throws IOException {
+              bufferedRequestBody.close();
+              realChain.eventListener()
+                  .requestBodyEnd(realChain.call(), requestBodyOut.successfulCount);
+            }
+          };
+        } else {
+          // Write the request body if the "Expect: 100-continue" expectation was met.
+          realChain.eventListener().requestBodyStart(realChain.call());
+          long contentLength = request.body().contentLength();
+          CountingSink requestBodyOut =
+              new CountingSink(httpCodec.createRequestBody(request, contentLength));
+          BufferedSink bufferedRequestBody = Okio.buffer(requestBodyOut);
+
+          request.body().writeTo(bufferedRequestBody);
+          bufferedRequestBody.close();
+          realChain.eventListener()
+              .requestBodyEnd(realChain.call(), requestBodyOut.successfulCount);
+        }
       } else if (!connection.isMultiplexed()) {
-        // If the "Expect: 100-continue" expectation wasn't met, prevent the HTTP/1 connection from
-        // being reused. Otherwise we're still obligated to transmit the request body to leave the
-        // connection in a consistent state.
+        // If the "Expect: 100-continue" expectation wasn't met, prevent the HTTP/1 connection
+        // from being reused. Otherwise we're still obligated to transmit the request body to
+        // leave the connection in a consistent state.
         streamAllocation.noNewStreams();
       }
     }
 
-    httpCodec.finishRequest();
+    if (Internal.instance.isDuplex(request)) {
+      httpCodec.flushRequest();
+    } else {
+      httpCodec.finishRequest();
+    }
 
     if (responseBuilder == null) {
+      realChain.eventListener().responseHeadersStart(realChain.call());
       responseBuilder = httpCodec.readResponseHeaders(false);
     }
 
-    Response response = responseBuilder
+    responseBuilder
         .request(request)
         .handshake(streamAllocation.connection().handshake())
         .sentRequestAtMillis(sentRequestMillis)
-        .receivedResponseAtMillis(System.currentTimeMillis())
-        .build();
+        .receivedResponseAtMillis(System.currentTimeMillis());
+    Internal.instance.httpSink(responseBuilder, httpSink);
+    Response response = responseBuilder.build();
 
     int code = response.code();
+    if (code == 100) {
+      // server sent a 100-continue even though we did not request one.
+      // try again to read the actual response
+      responseBuilder = httpCodec.readResponseHeaders(false);
+
+      responseBuilder
+          .request(request)
+          .handshake(streamAllocation.connection().handshake())
+          .sentRequestAtMillis(sentRequestMillis)
+          .receivedResponseAtMillis(System.currentTimeMillis());
+      Internal.instance.httpSink(responseBuilder, httpSink);
+      response = responseBuilder.build();
+
+      code = response.code();
+    }
+
+    if (Internal.instance.isDuplex(request)) {
+      Response.Builder builder = response.newBuilder();
+      Internal.instance.setHttp2Codec(builder, (Http2Codec) httpCodec);
+      response = builder.build();
+    }
+
+    realChain.eventListener()
+            .responseHeadersEnd(realChain.call(), response);
+
     if (forWebSocket && code == 101) {
       // Connection is upgrading, but we need to ensure interceptors see a non-null response body.
       response = response.newBuilder()
@@ -105,5 +183,18 @@ public final class CallServerInterceptor implements Interceptor {
     }
 
     return response;
+  }
+
+  static final class CountingSink extends ForwardingSink {
+    long successfulCount;
+
+    CountingSink(Sink delegate) {
+      super(delegate);
+    }
+
+    @Override public void write(Buffer source, long byteCount) throws IOException {
+      super.write(source, byteCount);
+      successfulCount += byteCount;
+    }
   }
 }

@@ -15,6 +15,7 @@
  */
 package okhttp3.internal.platform;
 
+import android.os.Build;
 import android.util.Log;
 import java.io.IOException;
 import java.lang.reflect.Constructor;
@@ -22,10 +23,14 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.security.NoSuchAlgorithmException;
+import java.security.Security;
 import java.security.cert.Certificate;
 import java.security.cert.TrustAnchor;
 import java.security.cert.X509Certificate;
 import java.util.List;
+import javax.annotation.Nullable;
+import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLPeerUnverifiedException;
 import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
@@ -35,6 +40,8 @@ import okhttp3.internal.Util;
 import okhttp3.internal.tls.BasicTrustRootIndex;
 import okhttp3.internal.tls.CertificateChainCleaner;
 import okhttp3.internal.tls.TrustRootIndex;
+
+import static okhttp3.internal.Util.assertionError;
 
 /** Android 2.3 or better. */
 class AndroidPlatform extends Platform {
@@ -73,10 +80,20 @@ class AndroidPlatform extends Platform {
       IOException ioException = new IOException("Exception in connect");
       ioException.initCause(e);
       throw ioException;
+    } catch (ClassCastException e) {
+      // On android 8.0, socket.connect throws a ClassCastException due to a bug
+      // see https://issuetracker.google.com/issues/63649622
+      if (Build.VERSION.SDK_INT == 26) {
+        IOException ioException = new IOException("Exception in connect");
+        ioException.initCause(e);
+        throw ioException;
+      } else {
+        throw e;
+      }
     }
   }
 
-  @Override public X509TrustManager trustManager(SSLSocketFactory sslSocketFactory) {
+  @Override protected @Nullable X509TrustManager trustManager(SSLSocketFactory sslSocketFactory) {
     Object context = readFieldOrNull(sslSocketFactory, sslParametersClass, "sslParameters");
     if (context == null) {
       // If that didn't work, try the Google Play Services SSL provider before giving up. This
@@ -113,7 +130,7 @@ class AndroidPlatform extends Platform {
     }
   }
 
-  @Override public String getSelectedProtocol(SSLSocket socket) {
+  @Override public @Nullable String getSelectedProtocol(SSLSocket socket) {
     if (getAlpnSelectedProtocol == null) return null;
     if (!getAlpnSelectedProtocol.isSupported(socket)) return null;
 
@@ -121,7 +138,7 @@ class AndroidPlatform extends Platform {
     return alpnResult != null ? new String(alpnResult, Util.UTF_8) : null;
   }
 
-  @Override public void log(int level, String message, Throwable t) {
+  @Override public void log(int level, String message, @Nullable Throwable t) {
     int logLevel = level == WARN ? Log.WARN : Log.DEBUG;
     if (t != null) message = message + '\n' + Log.getStackTraceString(t);
 
@@ -158,7 +175,7 @@ class AndroidPlatform extends Platform {
     } catch (ClassNotFoundException | NoSuchMethodException e) {
       return super.isCleartextTrafficPermitted(hostname);
     } catch (IllegalAccessException | IllegalArgumentException | InvocationTargetException e) {
-      throw new AssertionError();
+      throw assertionError("unable to determine cleartext support", e);
     }
   }
 
@@ -182,6 +199,23 @@ class AndroidPlatform extends Platform {
     } catch (NoSuchMethodException e) {
       return super.isCleartextTrafficPermitted(hostname);
     }
+  }
+
+  /**
+   * Checks to see if Google Play Services Dynamic Security Provider is present which provides ALPN
+   * support. If it isn't checks to see if device is Android 5.0+ since 4.x device have broken
+   * ALPN support.
+   */
+  private static boolean supportsAlpn() {
+    if (Security.getProvider("GMSCore_OpenSSL") != null) {
+      return true;
+    } else {
+      try {
+        Class.forName("android.net.Network"); // Arbitrary class added in Android 5.0.
+        return true;
+      } catch (ClassNotFoundException ignored) { }
+    }
+    return false;
   }
 
   public CertificateChainCleaner buildCertificateChainCleaner(X509TrustManager trustManager) {
@@ -216,12 +250,11 @@ class AndroidPlatform extends Platform {
       OptionalMethod<Socket> getAlpnSelectedProtocol = null;
       OptionalMethod<Socket> setAlpnProtocols = null;
 
-      // Attempt to find Android 5.0+ APIs.
-      try {
-        Class.forName("android.net.Network"); // Arbitrary class added in Android 5.0.
-        getAlpnSelectedProtocol = new OptionalMethod<>(byte[].class, "getAlpnSelectedProtocol");
-        setAlpnProtocols = new OptionalMethod<>(null, "setAlpnProtocols", byte[].class);
-      } catch (ClassNotFoundException ignored) {
+      if (supportsAlpn()) {
+        getAlpnSelectedProtocol
+            = new OptionalMethod<>(byte[].class, "getAlpnSelectedProtocol");
+        setAlpnProtocols
+            = new OptionalMethod<>(null, "setAlpnProtocols", byte[].class);
       }
 
       return new AndroidPlatform(sslParametersClass, setUseSessionTickets, setHostname,
@@ -372,7 +405,7 @@ class AndroidPlatform extends Platform {
                 ? trustAnchor.getTrustedCert()
                 : null;
       } catch (IllegalAccessException e) {
-        throw new AssertionError();
+        throw assertionError("unable to get issues and signature", e);
       } catch (InvocationTargetException e) {
         return null;
       }
@@ -394,6 +427,31 @@ class AndroidPlatform extends Platform {
     @Override
     public int hashCode() {
       return trustManager.hashCode() + 31 * findByIssuerAndSignatureMethod.hashCode();
+    }
+  }
+
+  @Override public SSLContext getSSLContext() {
+    boolean tryTls12;
+    try {
+      tryTls12 = (Build.VERSION.SDK_INT >= 16 && Build.VERSION.SDK_INT < 22);
+    } catch (NoClassDefFoundError e) {
+      // Not a real Android runtime; probably RoboVM or MoE
+      // Try to load TLS 1.2 explicitly.
+      tryTls12 = true;
+    }
+
+    if (tryTls12) {
+      try {
+        return SSLContext.getInstance("TLSv1.2");
+      } catch (NoSuchAlgorithmException e) {
+        // fallback to TLS
+      }
+    }
+
+    try {
+      return SSLContext.getInstance("TLS");
+    } catch (NoSuchAlgorithmException e) {
+      throw new IllegalStateException("No TLS provider", e);
     }
   }
 }

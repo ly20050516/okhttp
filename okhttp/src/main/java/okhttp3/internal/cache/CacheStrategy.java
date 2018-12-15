@@ -205,9 +205,6 @@ public final class CacheStrategy {
       }
 
       CacheControl responseCaching = cacheResponse.cacheControl();
-      if (responseCaching.immutable()) {
-        return new CacheStrategy(null, cacheResponse);
-      }
 
       long ageMillis = cacheResponseAge();
       long freshMillis = computeFreshnessLifetime();
@@ -295,7 +292,7 @@ public final class CacheStrategy {
 
     /**
      * Returns the current age of the response, in milliseconds. The calculation is specified by RFC
-     * 2616, 13.2.3 Age Calculations.
+     * 7234, 4.2.3 Calculating Age.
      */
     private long cacheResponseAge() {
       long apparentReceivedAge = servedDate != null
